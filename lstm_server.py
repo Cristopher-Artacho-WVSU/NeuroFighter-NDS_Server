@@ -7,6 +7,8 @@ from fastapi import FastAPI, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from preprocessing import preprocess_script
 from lstm_model import LSTMNet  # your model definition
+import os
+
 
 app = FastAPI()
 script_queue = asyncio.Queue()
@@ -14,8 +16,8 @@ script_queue = asyncio.Queue()
 # Load model once (cached)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = LSTMNet(input_size=10, hidden_size=64, output_size=10).to(device)
-model.load_state_dict(torch.load("lstm_cached.pth", map_location=device))
-model.eval()  # inference mode
+torch.save(model.state_dict(), "lstm_cached.pth")
+print("✅ Dummy LSTM model created as lstm_cached.pth")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
