@@ -1,109 +1,83 @@
-import torch
-from torch import nn, optim
-from lstm_model import LSTMNet
-from preprocessing import preprocess_script
+# lstm_online.py
 import asyncio
 import json
-import numpy as np
+import os
+import torch
+from torch import nn, optim
+from preprocessing import preprocess_script
+from lstm_model import LSTMNet
+from trainer_queue import training_queue
 
-# =====================================================
-# ✅ CONFIGURATION
-# =====================================================
+# TRAINER CONFIG (should match server INPUT_SIZE & OUTPUT_SIZE)
+INPUT_SIZE = 20
+HIDDEN_SIZE = 64
+OUTPUT_SIZE = 5
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Match this with the output of preprocess_script()
+# Trainer has its own model copy; it will save to same CACHE_PATH used by server.
+CACHE_PATH = "lstm_cached.pth"
 
-model = LSTMNet(input_size=20, hidden_size=64, output_size=5).to(device)
+model = LSTMNet(input_size=INPUT_SIZE, hidden_size=HIDDEN_SIZE, output_size=OUTPUT_SIZE).to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 loss_fn = nn.MSELoss()
 
-training_queue = asyncio.Queue()
+# Try load existing model weights if present
+if os.path.exists(CACHE_PATH):
+    try:
+        model.load_state_dict(torch.load(CACHE_PATH, map_location=device))
+        print("✅ Trainer loaded cached model.")
+    except Exception as e:
+        print("⚠️ Trainer failed to load cached model:", e)
 
-# Keep track of global stats
-rule_usage_counter = {}     # {rule_id: usage_count}
-rule_fitness_history = {}   # {rule_id: [fitness_values]}
-last_hidden = None          # Persist hidden states between cycles
+model.train()
 
+# Simple helper that turns a (1,1,input_size) x into a pseudo-target
+# For online/self-supervised update we use identity target (x) or any heuristic.
+def build_training_target(x_tensor):
+    # For simplicity: use identity target at LSTM output dimensionality by projecting input -> output
+    # Here we just use zeros target with small magnitude so training doesn't blow up.
+    # You can replace with a smarter label if you have one.
+    batch = x_tensor.shape[0]
+    seq = x_tensor.shape[1]
+    return torch.zeros((batch, seq, OUTPUT_SIZE), device=x_tensor.device, dtype=torch.float32)
 
-# =====================================================
-# 📊 INTERPRETATION LOGIC
-# =====================================================
-def analyze_rules(script, executed_rules, fitness):
-    for rule in script:
-        rule_id = rule["rule_id"]
-        used = rule["was_used"]
-        weight = rule["weight"]
-
-        if rule_id not in rule_usage_counter:
-            rule_usage_counter[rule_id] = 0
-            rule_fitness_history[rule_id] = []
-
-        if used or rule_id in executed_rules:
-            rule_usage_counter[rule_id] += 1
-            rule_fitness_history[rule_id].append(fitness)
-        else:
-            # Even unused rules get tracked
-            rule_fitness_history[rule_id].append(fitness * 0.5)
-
-
-def generate_rule_recommendations():
-    recommendations = []
-    for rule_id, usage_count in rule_usage_counter.items():
-        history = rule_fitness_history.get(rule_id, [])
-        avg_fitness = np.mean(history) if history else 0
-        effective = usage_count > 2 and avg_fitness > 0.5
-
-        if effective:
-            adjustment = min(0.05 + avg_fitness * 0.1, 0.2)
-        else:
-            adjustment = -min(0.05 + (0.5 - avg_fitness) * 0.1, 0.2)
-
-        recommendations.append({
-            "rule_id": rule_id,
-            "avg_fitness": round(avg_fitness, 3),
-            "usage_count": usage_count,
-            "adjustment": round(adjustment, 3)
-        })
-    return recommendations
-
-
-# =====================================================
-# 🧩 TRAINING LOOP
-# =====================================================
-async def train_worker():
-    global last_hidden, model
-
+async def train_worker(save_every=50):
+    step = 0
     while True:
         raw_data = await training_queue.get()
+        if not raw_data or not raw_data.strip():
+            continue
         try:
-            # Convert incoming JSON to features
-            x = preprocess_script(raw_data).to(device).unsqueeze(0).unsqueeze(0)  # (1,1,input_size)
-            data_dict = json.loads(raw_data)
+            # Preprocess
+            x_tensor, rule_ids = preprocess_script(raw_data)
+            x = x_tensor.to(device).unsqueeze(0).unsqueeze(0)  # (1,1,input_size)
 
-            # Analyze rules for heuristic-based recommendation
-            analyze_rules(data_dict["script"], data_dict["executed_rules"], data_dict["fitness"])
+            # Build a target y (self-supervised placeholder)
+            y = build_training_target(x)
 
-            # Prepare dummy target — self-supervised fine-tuning
-            y = x.detach()
-
-            model.train()
+            # Train step
             optimizer.zero_grad()
-
-            output, last_hidden = model(x, last_hidden)
+            output, _ = model(x)
             loss = loss_fn(output, y)
             loss.backward()
             optimizer.step()
 
-            # Interpret recommendations
-            recs = generate_rule_recommendations()
+            step += 1
+            if step % save_every == 0:
+                torch.save(model.state_dict(), CACHE_PATH)
+                print(f"💾 Trainer saved model to {CACHE_PATH} (step {step})")
 
-            print(f"\n✅ Processed cycle {data_dict['cycle_id']} | Fitness={data_dict['fitness']:.3f}")
-            print(f"➡️ Final feature vector length: {x.numel()}")
-            print(f"📊 Rule Recommendations:")
-            for r in recs:
-                direction = "⬆️" if r["adjustment"] > 0 else "⬇️"
-                print(f"  Rule {r['rule_id']} → {direction} {r['adjustment']} (avg_fitness={r['avg_fitness']}, used={r['usage_count']})")
+            # optional debug
+            print(f"🔁 Trained on cycle (rule_ids={rule_ids}) loss={loss.item():.6f}")
 
         except Exception as e:
-            print("⚠️ Error processing LSTM data:", str(e))
+            print("⚠️ Trainer error:", e)
             continue
+
+async def main():
+    # Run the trainer loop forever
+    await train_worker()
+
+if __name__ == "__main__":
+    asyncio.run(main())
