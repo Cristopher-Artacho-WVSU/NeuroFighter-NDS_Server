@@ -2,14 +2,21 @@
 import asyncio
 import json
 import os
+from typing import Literal, cast
 import torch
 from fastapi import FastAPI, WebSocket
 from fastapi.websockets import WebSocketDisconnect
-from preprocessing import preprocess_script
-from lstm_model import LSTMNet
-from trainer_queue import training_queue
+from fastapi.staticfiles import StaticFiles
+
+from .preprocessing import preprocess_script
+from .lstm_model import LSTMNet
+from .trainer_queue import training_queue
+from .analytics.main import analytics_router, rules_adjustments_history
+from .analytics.data_cleanup import fix_json_format, data_processing_queue
 
 app = FastAPI()
+app.include_router(analytics_router)
+app.mount("/static", StaticFiles(directory="analytics/static"), name="static")
 script_queue = asyncio.Queue()
 
 # MODEL CONFIG (must match preprocess final vector length)
@@ -38,6 +45,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             text = await websocket.receive_text()
             # put raw text into a local queue for worker to process
+            await data_processing_queue.put(text)
             await script_queue.put((text, websocket))
     except WebSocketDisconnect:
         print("Client disconnected")
@@ -84,6 +92,9 @@ async def lstm_worker():
 
             # Send response
             await websocket.send_text(json.dumps(formatted))
+
+            # For analytics
+            rules_adjustments_history.append(cast(list[dict[Literal["rule_id", "weight_adjustment"], int | float]], formatted))
 
             # Debug print
             print("✅ Sent prediction back to client:", formatted)

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="htmx-config" content='{"useTemplateFragments":true}'>
+		<title>Change in Weights</title>
+		<link href="/static/styles/opinionated.css" rel="stylesheet">
+	</head>
+	<body>
+		<h1>Before and After Weight Update</h1>
+		<table>
+			<tr>
+				<th>Rule</th>
+				<th>Adjustment</th>
+				<th>Usage</th>
+			</tr>
+			<tr id="rule-adjustment" hx-patch="/analytics/v0/tables" hx-trigger="every 500ms" hx-swap-oob="true"></tr>
+		</table>
+		<script src="/static/scripts/htmx.min.js">
+		</script>
+	</body>
+</html>

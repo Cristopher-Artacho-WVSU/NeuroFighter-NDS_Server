@@ -1,0 +1,7 @@
+{% for rule_adjusted in rules_adjusted %}
+<tr>
+	<td>{{ rule_adjusted["rule_id"] }}</td>
+	<td>{{ rule_adjusted["weight_adjustment"] }}</td>
+	<td>{{ rules_used[rule_adjusted["rule_id"]] }}</td>
+</tr>
+{% endfor %}
