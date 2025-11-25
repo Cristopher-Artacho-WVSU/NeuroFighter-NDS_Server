@@ -49,6 +49,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await script_queue.put((text, websocket))
     except WebSocketDisconnect:
         print("Client disconnected")
+        await data_processing_queue.join()
 
 async def lstm_worker():
     """

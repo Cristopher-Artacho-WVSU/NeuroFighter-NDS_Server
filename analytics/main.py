@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Literal, cast
 from fastapi import APIRouter, HTTPException
 from fastapi.requests import Request
@@ -47,14 +48,18 @@ async def weight_changes(request: Request):
         request=request, name="table_content.html", context={"rules_adjusted": last_rule, "rules_used": rule_usage}
     )
 
-@analytics_router.get("/weight-history", response_class=HTMLResponse)
+@analytics_router.get("/history", response_class=HTMLResponse)
 async def weight_history_display(request: Request):
     return analytics_templates.TemplateResponse(
         request=request, name="weight-history.html"
     )
 
-@analytics_router.patch("/weight-history", response_class=HTMLResponse)
-async def weight_history(request: Request):
+class AnalyticsType(str, Enum):
+    weights = "weights"
+    usage = "usage"
+
+@analytics_router.patch("/history/{analytics}", response_class=HTMLResponse)
+async def weight_history(analytics: AnalyticsType):
     global rules_history_df
     script_rules_df = await rules_to_df(data_processing_queue)
     if not rules_history_df.is_empty():
@@ -72,11 +77,33 @@ async def weight_history(request: Request):
     ).with_columns(
         pl.col("item_id").str.extract(r'(\d+)', 1).alias("Item_ID")
     ).drop("item_id")
-    print(weight_history)
-    usage = rules_history_for_graph.select(pl.col("^.*wasUsed.*$", "running_count"))
-    weight_history_chart = alt.Chart(weight_history).mark_line().encode(
-        x="running_count",
-        y="weight_value",
-        color="Item_ID"
-    ).to_html(output_div="weight-update-graphs", fullhtml=False)
-    return HTMLResponse(weight_history_chart)
+    usage = rules_history_for_graph.select(
+        pl.col("^.*wasUsed.*$", "running_count")).unpivot(
+        index="running_count",
+        variable_name="item_id",
+        value_name="was_used"
+    ).with_columns(
+        pl.col("item_id").str.extract(r'(\d+)', group_index=1).alias("Item_ID")
+    ).cast({"was_used": pl.Boolean}).drop("item_id")
+    match analytics:
+        case "weights":
+            weight_history_chart: str = alt.Chart(weight_history).mark_line().encode(
+                alt.X("running_count"),
+                alt.Y(
+                    "weight_value"
+                ).scale(
+                    domain=[0,1]
+                ),
+                alt.Color("Item_ID")
+            ).properties(
+                width=800,
+                height=300
+            ).to_html(output_div="weight-update-graphs", fullhtml=False)
+            return HTMLResponse(weight_history_chart)
+        case "usage":
+            print(usage)
+            ...
+    
+def clear_history():
+    global rules_history_df
+    rules_history_df = DataFrame()

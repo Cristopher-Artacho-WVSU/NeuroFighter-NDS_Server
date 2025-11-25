@@ -6,10 +6,19 @@
 		<meta name="htmx-config" content='{"useTemplateFragments":true}'>
 		<title>Change in Weights</title>
 		<link href="/static/styles/opinionated.css" rel="stylesheet">
+		<style>
+			body {
+				width: 100dvw;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+			}
+		</style>
 	</head>
 	<body>
 		<h1>Weight Update Graphs</h1>
-		<div id="weight-update-graphs" hx-patch="/analytics/v0/weight-history" hx-trigger="load delay:4100ms, every 2s" hx-swap-oob="true">
+		<div id="weight-update-graphs" hx-patch="/analytics/v0/history/weights" hx-trigger="load delay:4100ms, every 2s" hx-swap-oob="true">
 		</div>
 		<script src="/static/scripts/htmx.min.js">
 		</script>
