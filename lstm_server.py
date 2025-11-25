@@ -8,15 +8,19 @@ from fastapi.websockets import WebSocketDisconnect
 from preprocessing import preprocess_script
 from lstm_model import LSTMNet
 from trainer_queue import training_queue
+from fastapi.responses import HTMLResponse
+from collections import Counter
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 script_queue = asyncio.Queue()
+
 
 # MODEL CONFIG (must match preprocess final vector length)
 INPUT_SIZE = 20   # RULES_PER_SCRIPT*3 (15) + 4 player metrics + 1 fitness = 20
 HIDDEN_SIZE = 64
 OUTPUT_SIZE = 5   # one output per rule in the script
-
+history_table = []
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = LSTMNet(input_size=INPUT_SIZE, hidden_size=HIDDEN_SIZE, output_size=OUTPUT_SIZE).to(device)
 
@@ -30,6 +34,10 @@ if os.path.exists(CACHE_PATH):
         print("⚠️ Failed to load cached model:", e)
 
 model.eval()
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -77,9 +85,36 @@ async def lstm_worker():
             # Build structured response: [{rule_id, weight_adjustment}, ...]
             formatted = []
             for i in range(OUTPUT_SIZE):
+                rule_id = int(rule_ids[i]) if i < len(rule_ids) else -1
+                weight_adjustment = float(pred_vector[i])
+                
+                # Get old weight from input
+                old_weight = 0.0
+                try:
+                    old_weight = float(json.loads(raw_data)["script"][i].get("weight", 0.0))
+                except (IndexError, KeyError, TypeError):
+                    old_weight = 0.0
+
+                new_weight = old_weight + weight_adjustment
+
+                # Append to formatted response
                 formatted.append({
-                    "rule_id": int(rule_ids[i]) if i < len(rule_ids) else -1,
-                    "weight_adjustment": float(pred_vector[i])
+                    "rule_id": rule_id,
+                    "weight_adjustment": weight_adjustment
+                })
+
+                # Append to history table
+                try:
+                    cycle_id = int(json.loads(raw_data).get("cycle_id", -1))
+                except Exception:
+                    cycle_id = -1
+
+                history_table.append({
+                    "cycle_id": cycle_id,
+                    "rule_id": rule_id,
+                    "old_weight": old_weight,
+                    "new_weight": new_weight,
+                    "weight_adjustment": weight_adjustment
                 })
 
             # Send response
@@ -110,3 +145,137 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("✅ Client connected")
 
+@app.get("/history", response_class=HTMLResponse)
+async def get_history():
+    # Build HTML table with auto-refresh every 2 seconds
+    html = """
+    <html>
+    <head>
+        <title>LSTM History Table</title>
+        <style>
+            table { border-collapse: collapse; width: 80%; margin: 20px auto; }
+            th, td { border: 1px solid #333; padding: 8px 12px; text-align: center; }
+            th { background-color: #555; color: white; }
+            tr:nth-child(even) { background-color: #f2f2f2; }
+        </style>
+        <script>
+            setTimeout(function(){
+                window.location.reload(1);
+            }, 2000); // refresh every 2 seconds
+        </script>
+    </head>
+    <body>
+        <h2 style="text-align:center;">LSTM Rule History Table</h2>
+        <table>
+            <tr>
+                <th>Cycle ID</th>
+                <th>Rule ID</th>
+                <th>Old Weight</th>
+                <th>New Weight</th>
+                <th>Weight Adjustment</th>
+            </tr>
+    """
+
+    for entry in history_table:
+        html += f"""
+            <tr>
+                <td>{entry['cycle_id']}</td>
+                <td>{entry['rule_id']}</td>
+                <td>{entry['old_weight']:.4f}</td>
+                <td>{entry['new_weight']:.4f}</td>
+                <td>{entry['weight_adjustment']:.4f}</td>
+            </tr>
+        """
+
+    html += """
+        </table>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+
+def get_rule_counts():
+    """
+    Returns a dict mapping rule_id -> number of times it appeared in scripts
+    """
+    counts = Counter()
+    for entry in history_table:
+        rule_id = entry["rule_id"]
+        if rule_id != -1:
+            counts[rule_id] += 1
+    return counts
+
+
+
+@app.get("/bar", response_class=HTMLResponse)
+async def bar_chart():
+    counts = get_rule_counts()
+    labels = list(counts.keys())
+    values = list(counts.values())
+
+    html = f"""
+    <html>
+    <head>
+        <title>Rule Occurrences Bar Chart</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {{ text-align:center; font-family: Arial, sans-serif; }}
+            .chart-container {{
+                width: 1600px;   /* double original width */
+                height: 800px;   /* double original height */
+                margin: 0 auto;
+            }}
+        </style>
+    </head>
+    <body>
+        <h2>Rule Occurrences in Scripts</h2>
+        <div class="chart-container">
+            <canvas id="ruleChart"></canvas>
+        </div>
+        <script>
+            const ctx = document.getElementById('ruleChart').getContext('2d');
+            const data = {{
+                labels: {labels},
+                datasets: [{{
+                    label: 'Occurrences',
+                    data: {values},
+                    backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                }}]
+            }};
+            const config = {{
+                type: 'bar',
+                data: data,
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {{
+                        y: {{
+                            beginAtZero: true,
+                            precision: 0
+                        }}
+                    }}
+                }}
+            }};
+            const ruleChart = new Chart(ctx, config);
+
+            // Auto-refresh chart every 2 seconds
+            setInterval(async () => {{
+                const response = await fetch('/bar-data');
+                const newData = await response.json();
+                ruleChart.data.labels = newData.labels;
+                ruleChart.data.datasets[0].data = newData.values;
+                ruleChart.update();
+            }}, 2000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+@app.get("/bar-data")
+async def bar_data():
+    counts = get_rule_counts()
+    return JSONResponse({"labels": list(counts.keys()), "values": list(counts.values())})
